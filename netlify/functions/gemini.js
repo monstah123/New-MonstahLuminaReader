@@ -34,22 +34,22 @@ exports.handler = async (event, context) => {
       };
     }
 
-    const model = "gemini-1.5-flash-latest";
+   const model = "gemini-1.5-flash";
 
-const response = await fetch(
-  `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`,
-  {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [{ text: prompt }],
-        },
-      ],
-    }),
-  }
-);
+const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+console.log("Calling Gemini URL:", url);
+
+const response = await fetch(url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    contents: [
+      {
+        parts: [{ text: prompt }],
+      },
+    ],
+  }),
+});
 
     if (!response.ok) {
       const errorText = await response.text();
