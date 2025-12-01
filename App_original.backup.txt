@@ -1,0 +1,614 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { CameraView } from './components/CameraView';
+import { AudioPlayer } from './components/AudioPlayer';
+import { ChatInterface } from './components/ChatInterface';
+import { identifyBook, generateBookNarration, getChapterContent, searchBook, findBookSources } from './services/geminiService';
+import { BookInfo, AppState, Bookmark, GroundingChunk, StoredBook, StoredTrack, VoiceName, Language } from './types';
+import { formatTime, saveFile, createWavBlob, decodeBase64 } from './utils/audioUtils';
+import { saveBookToLibrary, getLibraryBooks, saveTrackToLibrary, getTrackFromLibrary, clearLibrary } from './utils/dbUtils';
+import { BookOpen, Sparkles, RotateCcw, Headphones, PlayCircle, Loader2, Search, Mic, MicOff, Bookmark as BookmarkIcon, Trash2, Moon, Sun, ChevronDown, ChevronUp, ArrowRight, Download, ShoppingBag, ExternalLink, FileText, HardDrive, Library, MessageCircle } from 'lucide-react';
+import { Toast, ToastType } from './components/Toast';
+import { CircularProgress } from './components/CircularProgress';
+
+const App: React.FC = () => {
+  const [state, setState] = useState<AppState>(AppState.IDLE);
+  const [scannedImage, setScannedImage] = useState<string | null>(null);
+  const [bookInfo, setBookInfo] = useState<BookInfo | null>(null);
+  const [audioData, setAudioData] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  
+  // Theme State
+  const [isDarkMode, setIsDarkMode] = useState(false);
+
+  // Voice State
+  const [currentVoice, setCurrentVoice] = useState<VoiceName>('Kore');
+  // Language State
+  const [currentLanguage, setCurrentLanguage] = useState<Language>('English');
+  // Auto-Play Settings
+  const [autoPlayNext, setAutoPlayNext] = useState(true);
+  const [autoStart, setAutoStart] = useState(true);
+
+  // Toast State
+  const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
+
+  // Search State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isListening, setIsListening] = useState(false);
+
+  // Library State
+  const [libraryBooks, setLibraryBooks] = useState<StoredBook[]>([]);
+  const [showLibrary, setShowLibrary] = useState(true);
+
+  // Playback State
+  const [activeTrack, setActiveTrack] = useState<string | null>(null); // 'Summary' or Chapter Name
+  const [loadingTrack, setLoadingTrack] = useState<string | null>(null);
+  const [loadingStatus, setLoadingStatus] = useState<string>(""); // Granular status
+  const [loadingProgress, setLoadingProgress] = useState<number>(0); // 0-100
+  const [initialStartTime, setInitialStartTime] = useState(0);
+  const [seekTrigger, setSeekTrigger] = useState<{ time: number; id: number } | null>(null);
+  const [isPlayerMinimized, setIsPlayerMinimized] = useState(false);
+  
+  // Chat State
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  
+  // Download State
+  const [downloadingChapter, setDownloadingChapter] = useState<string | null>(null);
+  
+  // Text Content for Read Along
+  const [activeText, setActiveText] = useState<string | null>(null);
+  const [isTextExpanded, setIsTextExpanded] = useState(false);
+  const [readingProgress, setReadingProgress] = useState(0);
+
+  // Bookmarks State
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+
+  // Download / Sources State
+  const [isSourcesOpen, setIsSourcesOpen] = useState(false);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+  const [foundSources, setFoundSources] = useState<GroundingChunk[]>([]);
+  
+  const trackCache = useRef<Map<string, { text: string, audio: string }>>(new Map());
+  const textSectionRef = useRef<HTMLDivElement>(null);
+
+  // Init Load
+  useEffect(() => {
+    const savedBookmarks = localStorage.getItem('monstah_lumina_bookmarks');
+    if (savedBookmarks) {
+      try {
+        setBookmarks(JSON.parse(savedBookmarks));
+      } catch (e) {
+        console.error("Failed to load bookmarks", e);
+      }
+    }
+
+    const savedTheme = localStorage.getItem('monstah_lumina_theme');
+    if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      setIsDarkMode(true);
+      document.documentElement.classList.add('dark');
+    } else {
+      setIsDarkMode(false);
+      document.documentElement.classList.remove('dark');
+    }
+
+    // Load Library
+    refreshLibrary();
+  }, []);
+
+  const refreshLibrary = async () => {
+    try {
+      const books = await getLibraryBooks();
+      setLibraryBooks(books);
+    } catch (e) {
+      console.error("Failed to load library", e);
+    }
+  };
+
+  const handleClearLibrary = async () => {
+    if (window.confirm("Are you sure you want to delete all books, audio, and bookmarks? This cannot be undone.")) {
+      try {
+        // 1. Delete DB
+        await clearLibrary();
+        
+        // 2. Clear Local Storage Bookmarks
+        localStorage.removeItem('monstah_lumina_bookmarks');
+        
+        // 3. Reset State
+        setLibraryBooks([]);
+        setBookmarks([]);
+        trackCache.current.clear();
+        
+        // 4. Reset App View if looking at a book
+        if (state !== AppState.IDLE) {
+          resetApp();
+        }
+
+        showToast("Library completely reset", "success");
+      } catch (e) {
+        console.error("Failed to clear library", e);
+        showToast("Failed to clear library", "error");
+      }
+    }
+  };
+
+  const toggleTheme = () => {
+    if (isDarkMode) {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('monstah_lumina_theme', 'light');
+      setIsDarkMode(false);
+    } else {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('monstah_lumina_theme', 'dark');
+      setIsDarkMode(true);
+    }
+  };
+
+  const showToast = (message: string, type: ToastType = 'info') => {
+    setToast({ message, type });
+  };
+
+  const saveBookmark = (time: number) => {
+    if (!bookInfo || !activeTrack) return;
+    
+    const newBookmark: Bookmark = {
+      id: Date.now().toString(),
+      bookTitle: bookInfo.title,
+      chapter: activeTrack,
+      timestamp: time,
+      createdAt: Date.now()
+    };
+
+    const updated = [newBookmark, ...bookmarks];
+    setBookmarks(updated);
+    localStorage.setItem('monstah_lumina_bookmarks', JSON.stringify(updated));
+    showToast('Bookmark saved', 'success');
+  };
+
+  const deleteBookmark = (id: string) => {
+    const updated = bookmarks.filter(b => b.id !== id);
+    setBookmarks(updated);
+    localStorage.setItem('monstah_lumina_bookmarks', JSON.stringify(updated));
+    showToast('Bookmark removed', 'info');
+  };
+
+  const handleRestoreBookmark = async (bookmark: Bookmark) => {
+    if (activeTrack !== bookmark.chapter) {
+      if (bookmark.chapter === 'Book Summary') {
+         await handlePlaySummary(bookmark.timestamp);
+      } else {
+         await handlePlayChapter(bookmark.chapter, bookmark.timestamp);
+      }
+    } else {
+      setSeekTrigger({ time: bookmark.timestamp, id: Date.now() });
+    }
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  };
+
+  const handleCapture = async (base64: string) => {
+    setScannedImage(base64);
+    setState(AppState.PROCESSING);
+    try {
+      const info = await identifyBook(base64);
+      setBookInfo(info);
+      setState(AppState.RESULT);
+      trackCache.current.clear();
+      // Save to Library
+      await saveBookToLibrary(info, base64);
+      refreshLibrary();
+    } catch (err: any) {
+      console.error(err);
+      setErrorMsg(err.message || "Could not identify the book. Please try again with better lighting or angle.");
+      setState(AppState.ERROR);
+    }
+  };
+
+  const handleSearch = async (e?: React.FormEvent, manualQuery?: string) => {
+    if (e) e.preventDefault();
+    const query = manualQuery || searchQuery;
+    if (!query.trim()) return;
+
+    if (manualQuery) setSearchQuery(manualQuery);
+
+    setScannedImage(null);
+    setState(AppState.PROCESSING);
+    
+    setBookInfo(null);
+    setAudioData(null);
+    setActiveTrack(null);
+    setActiveText(null);
+    setReadingProgress(0);
+    setFoundSources([]);
+    setIsSourcesOpen(false);
+    trackCache.current.clear();
+    setIsPlayerMinimized(false);
+
+    try {
+      const info = await searchBook(query);
+      setBookInfo(info);
+      setState(AppState.RESULT);
+      // Save to Library (no cover image for search unless we fetch one, using null for now)
+      await saveBookToLibrary(info, null);
+      refreshLibrary();
+    } catch (err: any) {
+      console.error(err);
+      setErrorMsg(err.message || "Could not find the book. Please try again.");
+      setState(AppState.ERROR);
+    }
+  };
+
+  const handleLibraryBookClick = (stored: StoredBook) => {
+    setBookInfo(stored.info);
+    setScannedImage(stored.coverImage);
+    setSearchQuery('');
+    setAudioData(null);
+    setActiveTrack(null);
+    setActiveText(null);
+    setReadingProgress(0);
+    setState(AppState.RESULT);
+    trackCache.current.clear();
+    setIsPlayerMinimized(false);
+    // Also update last accessed
+    saveBookToLibrary(stored.info, stored.coverImage);
+  };
+
+  const toggleVoiceInput = () => {
+    if (isListening) {
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      showToast("Voice input is not supported in this browser.", 'error');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => setIsListening(true);
+    recognition.onend = () => setIsListening(false);
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setSearchQuery(transcript);
+    };
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event.error);
+      setIsListening(false);
+      showToast("Could not hear you. Please try again.", 'error');
+    };
+
+    recognition.start();
+  };
+
+  // Helper to get track data (Memory Cache -> IndexedDB -> Generate)
+  const getTrackData = async (trackName: string, title: string, author: string, isSummary: boolean, language: Language): Promise<{text: string, audio: string}> => {
+     // Include language in cache key
+     const cacheKey = `${title}-${trackName}-${language}`;
+     
+     // 1. Memory Cache
+     if (trackCache.current.has(cacheKey)) {
+        setLoadingProgress(100);
+        return trackCache.current.get(cacheKey)!;
+     }
+
+     // 2. IndexedDB
+     try {
+        const stored = await getTrackFromLibrary(title, trackName);
+        // Only return if voice AND language match
+        if (stored && stored.voice === currentVoice && stored.language === language) {
+             trackCache.current.set(cacheKey, { text: stored.text, audio: stored.audio });
+             setLoadingProgress(100);
+             return { text: stored.text, audio: stored.audio };
+        }
+     } catch(e) {
+        console.warn("DB Load failed", e);
+     }
+
+     // 3. Generate
+     // Initialize simulated progress
+     setLoadingProgress(5);
+     const progressInterval = setInterval(() => {
+        setLoadingProgress(prev => {
+          if (prev >= 95) return prev;
+          // Slow down as we approach 95
+          const increment = prev < 50 ? 4 : prev < 80 ? 1.5 : 0.5;
+          return prev + increment;
+        });
+     }, 200);
+
+     try {
+        setLoadingStatus(isSummary ? `Writing summary (${language})...` : `Writing story (${language})...`);
+        
+        let textToRead = "";
+        if (isSummary) {
+             // For summaries, we might just have English metadata. If language is not English, request a translation/summary
+             if (language === 'English') {
+                textToRead = `${title}, by ${author}. ${bookInfo!.description}`;
+             } else {
+                // If summary in another language is needed, we should probably generate it via AI to be safe, 
+                // but for now re-using getChapterContent logic for summary generation if we treated it as a prompt
+                textToRead = await getChapterContent(title, author, "Book Summary", language);
+             }
+        } else {
+             textToRead = await getChapterContent(title, author, trackName, language);
+        }
+          
+        setLoadingProgress(35); // Bump progress on text complete
+
+        setLoadingStatus(`Creating voice (${currentVoice})...`);
+        const audioBase64 = await generateBookNarration(textToRead, currentVoice);
+        
+        if (!audioBase64) throw new Error("Failed to generate audio");
+
+        // 4. Save to DB & Cache
+        const trackData = { text: textToRead, audio: audioBase64 };
+        trackCache.current.set(cacheKey, trackData);
+        
+        saveTrackToLibrary({
+          bookTitle: title,
+          trackName: trackName,
+          text: textToRead,
+          audio: audioBase64,
+          voice: currentVoice,
+          language: language,
+          createdAt: Date.now()
+        }).catch(e => console.warn("Failed to save track to DB", e));
+
+        clearInterval(progressInterval);
+        setLoadingProgress(100);
+        return trackData;
+     } catch(e) {
+        clearInterval(progressInterval);
+        setLoadingProgress(0);
+        throw e;
+     }
+  };
+
+  const handlePlaySummary = async (startTime: number = 0, forceLanguage?: Language) => {
+    if (!bookInfo) return;
+    const trackName = "Book Summary";
+    const langToUse = forceLanguage || currentLanguage;
+    
+    setInitialStartTime(startTime);
+    setReadingProgress(0);
+    
+    // If playing same track/lang, just expand
+    const cacheKey = `${bookInfo.title}-${trackName}-${langToUse}`;
+    if (activeTrack === trackName && audioData && trackCache.current.has(cacheKey)) {
+      if (startTime > 0) setSeekTrigger({ time: startTime, id: Date.now() });
+      setIsTextExpanded(true);
+      setIsPlayerMinimized(false);
+      return;
+    }
+
+    // Don't set audioData to null, just set loading status. AudioPlayer handles transition.
+    setLoadingTrack(trackName);
+    setActiveTrack(trackName); // Optimistic update for UI highlighting
+    
+    try {
+      const { text, audio } = await getTrackData(trackName, bookInfo.title, bookInfo.author, true, langToUse);
+      
+      setActiveText(text);
+      setAudioData(audio);
+      // setActiveTrack(trackName); // Already set
+      setIsTextExpanded(true);
+      setIsPlayerMinimized(false);
+      setTimeout(() => {
+           textSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || "Failed to generate narration.", 'error');
+      // If failed, clear optimistic track
+      if (activeTrack === trackName) setActiveTrack(null);
+    } finally {
+      setLoadingTrack(null);
+      setLoadingStatus("");
+    }
+  };
+
+  const handlePlayChapter = async (chapter: string, startTime: number = 0, forceLanguage?: Language) => {
+    if (!bookInfo) return;
+    const langToUse = forceLanguage || currentLanguage;
+    
+    setInitialStartTime(startTime);
+    setReadingProgress(0);
+
+    const cacheKey = `${bookInfo.title}-${chapter}-${langToUse}`;
+    if (activeTrack === chapter && audioData && trackCache.current.has(cacheKey)) {
+      if (startTime > 0) setSeekTrigger({ time: startTime, id: Date.now() });
+      setIsTextExpanded(true);
+      setIsPlayerMinimized(false);
+      return;
+    }
+
+    // Don't set audioData to null, keep player mounted.
+    setLoadingTrack(chapter);
+    setActiveTrack(chapter); // Optimistic update
+
+    try {
+      const { text, audio } = await getTrackData(chapter, bookInfo.title, bookInfo.author, false, langToUse);
+      
+      setActiveText(text);
+      setAudioData(audio);
+      // setActiveTrack(chapter); // Already set
+      setIsTextExpanded(true);
+      setIsPlayerMinimized(false);
+      setTimeout(() => {
+           textSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || "Failed to load chapter audio. Please try again.", 'error');
+      if (activeTrack === chapter) setActiveTrack(null);
+    } finally {
+      setLoadingTrack(null);
+      setLoadingStatus("");
+    }
+  };
+
+  const handleTrackFinished = () => {
+    // Logic for Auto-Play Next
+    if (autoPlayNext && bookInfo && activeTrack) {
+       if (activeTrack === 'Book Summary') {
+          // Finished summary, play first chapter
+          if (bookInfo.chapters.length > 0) {
+            showToast("Playing Chapter 1...", "info");
+            handlePlayChapter(bookInfo.chapters[0]);
+            return;
+          }
+       } else {
+          // Finished a chapter, find next
+          const idx = bookInfo.chapters.indexOf(activeTrack);
+          if (idx !== -1 && idx < bookInfo.chapters.length - 1) {
+             const nextChapter = bookInfo.chapters[idx + 1];
+             showToast(`Playing ${nextChapter}...`, "info");
+             handlePlayChapter(nextChapter);
+             return;
+          }
+       }
+    }
+    showToast("Playback finished", "info");
+  };
+
+  const handleLanguageChange = (lang: Language) => {
+    setCurrentLanguage(lang);
+    
+    // If we are currently playing something, reload it in the new language
+    if (activeTrack && bookInfo) {
+       if (activeTrack === "Book Summary") {
+          handlePlaySummary(0, lang);
+       } else {
+          handlePlayChapter(activeTrack, 0, lang);
+       }
+    }
+  };
+
+  const handleDownloadChapter = async (chapter: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (downloadingChapter || !bookInfo) return;
+    setDownloadingChapter(chapter);
+
+    try {
+      const { audio } = await getTrackData(chapter, bookInfo.title, bookInfo.author, false, currentLanguage);
+
+      const byteArray = decodeBase64(audio);
+      const blob = createWavBlob(byteArray);
+
+      const safeTitle = bookInfo.title.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
+      const safeChapter = chapter.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
+      const filename = `${safeTitle}-${safeChapter}-${currentLanguage}.wav`;
+
+      const saved = await saveFile(blob, filename, 'WAV Audio');
+      if (saved) showToast(`File saved successfully`, 'success');
+    } catch (err: any) {
+      console.error(err);
+      showToast("Failed to download. Try playing it first.", 'error');
+    } finally {
+      setDownloadingChapter(null);
+    }
+  };
+
+  const handleFindSources = async () => {
+    if (!bookInfo) return;
+    setIsSourcesOpen(!isSourcesOpen);
+    if (isSourcesOpen || foundSources.length > 0) return;
+
+    setSourcesLoading(true);
+    try {
+      const result = await findBookSources(bookInfo.title, bookInfo.author);
+      setFoundSources(result.links);
+      if (result.links.length === 0) {
+        showToast("No direct links found, try a manual search.", "info");
+      }
+    } catch (err) {
+      showToast("Could not find external sources.", "error");
+    } finally {
+      setSourcesLoading(false);
+    }
+  };
+
+  const handleDownloadText = async () => {
+    if (!activeText || !activeTrack) {
+      showToast("Nothing to download yet. Play a chapter first.", "error");
+      return;
+    }
+    const blob = new Blob([activeText], { type: 'text/plain' });
+    const filename = `${bookInfo?.title || 'book'}-${activeTrack.replace(/\s+/g, '_')}.txt`;
+    
+    const saved = await saveFile(blob, filename, 'Text File');
+    if (saved) showToast("Text saved", "success");
+  };
+
+  const handleSaveToDrive = async () => {
+    if (!activeTrack || !audioData) {
+        showToast("No audio loaded to save. Play a chapter first.", "error");
+        return;
+    }
+    await handleDownloadChapter(activeTrack);
+  };
+
+  const resetApp = () => {
+    setState(AppState.IDLE);
+    setScannedImage(null);
+    setBookInfo(null);
+    setAudioData(null);
+    setErrorMsg(null);
+    setActiveTrack(null);
+    setLoadingTrack(null);
+    setLoadingStatus("");
+    setSearchQuery('');
+    setInitialStartTime(0);
+    setSeekTrigger(null);
+    setToast(null);
+    setActiveText(null);
+    setIsTextExpanded(false);
+    setReadingProgress(0);
+    setIsSourcesOpen(false);
+    setFoundSources([]);
+    setIsChatOpen(false);
+    trackCache.current.clear();
+    refreshLibrary();
+  };
+
+  const renderHighlightedText = () => {
+    if (!activeText) return null;
+    const totalChars = activeText.length;
+    const splitIndex = Math.floor(readingProgress * totalChars);
+    let accumulatedChars = 0;
+
+    return activeText.split('\n').map((paragraph, pIdx) => {
+       if (!paragraph.trim()) {
+         accumulatedChars += 1;
+         return <br key={pIdx} className="mb-4 block" />;
+       }
+       const pStart = accumulatedChars;
+       const pEnd = accumulatedChars + paragraph.length;
+       accumulatedChars += paragraph.length + 1;
+
+       if (splitIndex >= pEnd) {
+         return <p key={pIdx} className="mb-4 bg-brand-gold/20 text-brand-dark dark:text-white rounded px-1 transition-colors duration-300">{paragraph}</p>;
+       }
+       if (splitIndex <= pStart) {
+         return <p key={pIdx} className="mb-4 text-gray-400 dark:text-gray-600 transition-colors duration-300 px-1">{paragraph}</p>;
+       }
+       const splitAt = splitIndex - pStart;
+       return (
+         <p key={pIdx} className="mb-4 px-1">
+            <span className="bg-brand-gold/20 text-brand-dark dark:text-white rounded-l transition-colors">{paragraph.substring(0, splitAt)}</span>
+            <span className="text-gray-400 dark:text-gray-600 transition-colors">{paragraph.substring(splitAt)}</span>
+         </p>
+       );
+    });
+  };
+
+  const currentBookBookmarks = bookmarks.filter(b => b.bookTitle === bookInfo?.title);
+
+  return (
+    <div className="min-h-screen bg-brand-paper dark:bg-brand-dark font-sans text-brand-dark dark:text-brand-paper selection:bg-brand-gold/30 relative transition-colors duration-300">
+      
+      {toast && (
+        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+ 
