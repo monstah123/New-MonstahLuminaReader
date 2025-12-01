@@ -7,10 +7,20 @@ export async function askGemini(prompt: string): Promise<string> {
     body: JSON.stringify({ prompt }),
   });
 
+  const text = await res.text(); // read body as text for debugging
+
   if (!res.ok) {
-    throw new Error("Request failed with status " + res.status);
+    // Log full error to browser console
+    console.error("Function error response:", res.status, text);
+    throw new Error(`Request failed ${res.status}: ${text}`);
   }
 
-  const data = await res.json();
-  return data.text || "No text in response";
+  // Try to parse JSON if possible
+  try {
+    const data = JSON.parse(text);
+    return data.text || data.error || "No text in response";
+  } catch {
+    // If it's not JSON, just return raw text
+    return text || "No text in response";
+  }
 }

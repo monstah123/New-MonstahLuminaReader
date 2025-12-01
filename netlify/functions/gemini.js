@@ -1,11 +1,12 @@
 // netlify/functions/gemini.js
 
-// This is a Netlify serverless function.
-// Your React app will call THIS instead of talking to Gemini directly.
+// Netlify serverless function:
+// - Receives { prompt } from the browser
+// - Calls Google's Gemini API using GEMINI_API_KEY
+// - Returns { text } or { error }
 
 exports.handler = async (event, context) => {
   try {
-    // Only allow POST requests
     if (event.httpMethod !== "POST") {
       return {
         statusCode: 405,
@@ -13,7 +14,6 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Read JSON sent from the browser: { "prompt": "..." }
     const body = JSON.parse(event.body || "{}");
     const prompt = body.prompt;
 
@@ -24,16 +24,16 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Get your Gemini API key from an environment variable (in Netlify)
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
+      console.error("Missing GEMINI_API_KEY");
       return {
         statusCode: 500,
-        body: "Server error: missing GEMINI_API_KEY",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "Server error: missing GEMINI_API_KEY" }),
       };
     }
 
-    // Call the Google Gemini REST API
     const response = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=" +
         apiKey,
@@ -55,18 +55,19 @@ exports.handler = async (event, context) => {
       console.error("Gemini API error:", response.status, errorText);
       return {
         statusCode: 500,
-        body: "Gemini API error: " + response.status,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: `Gemini API error ${response.status}: ${errorText}`,
+        }),
       };
     }
 
     const data = await response.json();
 
-    // Pull the model's text out of the response
     const text =
       data.candidates?.[0]?.content?.parts?.[0]?.text ||
       "No answer from model.";
 
-    // Send JSON back to the browser: { "text": "the answer..." }
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
@@ -76,7 +77,8 @@ exports.handler = async (event, context) => {
     console.error("Server error:", err);
     return {
       statusCode: 500,
-      body: "Server error",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: err.message || String(err) }),
     };
   }
 };
