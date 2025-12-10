@@ -1,0 +1,19 @@
+body {
+    width: 250px;
+    height: 100px;
+    padding: 10px;
+  }
+  
+  .search-container {
+    margin-bottom: 10px;
+  }
+  
+  #search-input {
+    width: 180px;
+    margin-right: 5px;
+  }
+  
+  #search-button {
+    width: 60px;
+  }
+  

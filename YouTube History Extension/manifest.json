@@ -1,0 +1,28 @@
+{
+    "manifest_version": 3,
+    "name": "YouTube History Extension",
+    "version": "1.0",
+    "description": "Shows recent YouTube video links from history",
+    "permissions": [
+      "history",
+      "storage"
+    ],
+    "background": {
+      "service_worker": "background.js"
+    },
+    "action": {
+      "default_popup": "popup.html",
+      "default_title": "YouTube History"
+    },
+    "icons": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    },
+    "action_handlers": {
+      "default": {
+        "type": "popup"
+      }
+    }
+  }
+  

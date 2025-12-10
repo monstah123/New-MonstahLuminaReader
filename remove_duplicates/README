@@ -1,0 +1,13 @@
+Make the Script Executable:
+Open the terminal and navigate to the directory where you saved the script. Make the script executable:
+
+
+chmod +x remove_duplicates.sh
+
+Run the Script:
+Execute the script:
+
+
+./remove_duplicates.sh
+
+This approach ensures that the script runs as a single unit, reducing the risk of errors and making it easier to manage.
